@@ -7,7 +7,7 @@ esphome:
 
 # Add external component
 external_components:
-  - source: github://yourusername/your-modbus-tcp-repo
+  - source: github:///Gucioo/esphome_modbus_tcp_master/
     components: [modbus_tcp]
   # OR for local development:
   # - source:
@@ -34,11 +34,11 @@ ota:
 sensor:
   - platform: modbus_tcp
     name: "Modbus Value"
-    host: "192.168.1.100"  # IP address of your Modbus TCP server
+    host: "192.168.0.3"  # IP address of your Modbus TCP server
     port: 502              # Modbus TCP port (default 502)
-    register_address: 0    # Register address to read
+    register_address: 3001    # Register address to read
     byte_order: "AB_CD"    # Byte order: AB_CD, CD_AB, or DC_BA
-    accuracy_decimals: 2   # Number of decimal places
+    accuracy_decimals: 1   # Number of decimal places
     update_interval: 30s   # How often to poll the register
-    unit_of_measurement: "V"  # Optional: add your unit
-    device_class: "voltage"   # Optional: Home Assistant device class
+    unit_of_measurement: "°C"  # Optional: add your unit
+    device_class: "temperature"   # Optional: Home Assistant device class
