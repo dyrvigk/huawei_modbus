@@ -19,6 +19,9 @@ CONF_ACCURACY_DECIMALS = "accuracy_decimals"
 modbus_tcp_ns = cg.esphome_ns.namespace("modbus_tcp")
 ModbusTCPSensor = modbus_tcp_ns.class_("ModbusTCPSensor", cg.PollingComponent, sensor.Sensor)
 
+# Dependencies
+DEPENDENCIES = ["network"]
+
 # Configuration schema
 CONFIG_SCHEMA = sensor.sensor_schema(
     ModbusTCPSensor,
