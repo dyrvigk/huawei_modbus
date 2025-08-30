@@ -1,0 +1,44 @@
+# Example ESPHome configuration using the external Modbus TCP component
+
+esphome:
+  name: modbus-tcp-test
+  platform: ESP32
+  board: esp32dev
+
+# Add external component
+external_components:
+  - source: github://yourusername/your-modbus-tcp-repo
+    components: [modbus_tcp]
+  # OR for local development:
+  # - source:
+  #     type: local
+  #     path: /path/to/your/components
+  #   components: [modbus_tcp]
+
+wifi:
+  ssid: "your_wifi_ssid"
+  password: "your_wifi_password"
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "your_api_key"
+
+ota:
+  password: "your_ota_password"
+
+# Configure the Modbus TCP sensor
+sensor:
+  - platform: modbus_tcp
+    name: "Modbus Value"
+    host: "192.168.1.100"  # IP address of your Modbus TCP server
+    port: 502              # Modbus TCP port (default 502)
+    register_address: 0    # Register address to read
+    byte_order: "AB_CD"    # Byte order: AB_CD, CD_AB, or DC_BA
+    accuracy_decimals: 2   # Number of decimal places
+    update_interval: 30s   # How often to poll the register
+    unit_of_measurement: "V"  # Optional: add your unit
+    device_class: "voltage"   # Optional: Home Assistant device class
