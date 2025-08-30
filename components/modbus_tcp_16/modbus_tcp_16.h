@@ -5,9 +5,14 @@
 #include "esphome/core/log.h"
 #include <string>
 #include <vector>
+
+#ifdef USE_ESP32
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+#endif
 
 namespace esphome {
 namespace modbus_tcp {
@@ -30,8 +35,8 @@ public:
     void update() override {
         ESP_LOGV(TAG, "Updating Modbus TCP sensor");
         
-        // Create socket
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        // Create socket using global scope
+        int sock = ::socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
             ESP_LOGE(TAG, "Could not create socket: %d", errno);
             this->publish_state(NAN);
@@ -42,19 +47,19 @@ public:
         struct timeval timeout;
         timeout.tv_sec = 5;
         timeout.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
         // Resolve hostname
         struct sockaddr_in server_addr;
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(port_);
         
-        if (inet_aton(host_.c_str(), &server_addr.sin_addr) == 0) {
-            struct hostent *he = gethostbyname(host_.c_str());
+        if (::inet_aton(host_.c_str(), &server_addr.sin_addr) == 0) {
+            struct hostent *he = ::gethostbyname(host_.c_str());
             if (he == nullptr) {
                 ESP_LOGE(TAG, "Could not resolve hostname: %s", host_.c_str());
-                close(sock);
+                ::close(sock);
                 this->publish_state(NAN);
                 return;
             }
@@ -62,9 +67,9 @@ public:
         }
 
         // Connect
-        if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        if (::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
             ESP_LOGE(TAG, "Could not connect to %s:%d - %d", host_.c_str(), port_, errno);
-            close(sock);
+            ::close(sock);
             this->publish_state(NAN);
             return;
         }
@@ -75,17 +80,17 @@ public:
         std::vector<uint8_t> request = build_modbus_request();
         
         // Send request
-        if (send(sock, request.data(), request.size(), 0) < 0) {
+        if (::send(sock, request.data(), request.size(), 0) < 0) {
             ESP_LOGE(TAG, "Could not send data: %d", errno);
-            close(sock);
+            ::close(sock);
             this->publish_state(NAN);
             return;
         }
 
         // Read response
         uint8_t response[256];
-        int len = recv(sock, response, sizeof(response), 0);
-        close(sock);
+        int len = ::recv(sock, response, sizeof(response), 0);
+        ::close(sock);
 
         if (len < 9) {
             ESP_LOGE(TAG, "Invalid response length: %d", len);
