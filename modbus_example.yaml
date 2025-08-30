@@ -7,7 +7,7 @@ esphome:
 
 # Add external component
 external_components:
-  - source: github:///Gucioo/esphome_modbus_tcp_master/
+  - source: github://Gucioo/esphome_modbus_tcp_master/
     components: [modbus_tcp]
   # OR for local development:
   # - source:
