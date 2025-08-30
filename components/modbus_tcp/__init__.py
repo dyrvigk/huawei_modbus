@@ -6,6 +6,10 @@ from esphome.const import CONF_ID
 modbus_tcp_ns = cg.esphome_ns.namespace("modbus_tcp")
 ModbusTCPComponent = modbus_tcp_ns.class_("ModbusTCPComponent", cg.Component)
 
+# Dependencies - requires network for TCP connectivity
+DEPENDENCIES = ["network"]
+CODEOWNERS = ["@Gucioo"]
+
 # Configuration schema for the main component
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(ModbusTCPComponent),
