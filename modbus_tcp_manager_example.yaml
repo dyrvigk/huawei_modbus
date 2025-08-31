@@ -1,1 +1,148 @@
 
+esphome:
+  name: thermostat-pid-complete
+  platform: ESP32
+  board: esp32dev
+
+wifi:
+  ssid: "your_ssid"
+  password: "your_password"
+
+logger:
+  level: DEBUG
+  logs:
+    modbus_tcp_manager: DEBUG
+
+api:
+  encryption:
+    key: "your_api_key"
+
+ota:
+  password: "your_ota_password"
+
+# External component with robust error handling
+external_components:
+  - source: github://Gucioo/esphome_modbus_tcp_master
+    components: [modbus_tcp_manager]
+    refresh: 0s
+
+# Single Modbus TCP connection manager
+modbus_tcp_manager:
+  id: modbus_device
+  host: "192.168.0.3"
+  port: 502
+  unit_id: 1
+
+# Connection status indicator
+binary_sensor:
+  - platform: modbus_tcp_manager
+    modbus_tcp_id: modbus_device
+    name: "Modbus Connection Status"
+    device_class: connectivity
+
+# Temperature sensors using the manager
+sensor:
+  - platform: modbus_tcp_manager
+    modbus_tcp_id: modbus_device
+    name: "AI1 LOGO Temperature"
+    register_address: 0
+    function_code: 4  # Input register
+    scale: 0.1
+    update_interval: 5s
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    accuracy_decimals: 1
+    
+  - platform: modbus_tcp_manager
+    modbus_tcp_id: modbus_device
+    name: "AM64 LOGO Temperature"
+    register_address: 591
+    function_code: 3  # Holding register
+    scale: 0.1
+    update_interval: 5s
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    accuracy_decimals: 1
+
+  # Local temperature sensor that triggers writes
+  - platform: dallas
+    name: "Local Temperature"
+    id: local_temp
+    on_value:
+      then:
+        - modbus_tcp.write_register:
+            id: modbus_device
+            register: 100
+            value: !lambda "return (int16_t)(x * 10);"  # Scale by 10 for device
+
+# Number inputs for manual setpoints
+number:
+  - platform: template
+    name: "Boiler Setpoint"
+    id: boiler_setpoint
+    min_value: 0
+    max_value: 100
+    step: 0.5
+    optimistic: true
+    unit_of_measurement: "°C"
+    set_action:
+      then:
+        - modbus_tcp.write_register:
+            id: modbus_device
+            register: 101
+            value: !lambda "return (int16_t)(x * 10);"
+
+  - platform: template
+    name: "System Mode"
+    id: system_mode
+    min_value: 0
+    max_value: 5
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - modbus_tcp.write_register:
+            id: modbus_device
+            register: 102
+            value: !lambda "return (int16_t)x;"
+
+# Switch for boiler on/off
+switch:
+  - platform: template
+    name: "Boiler Enable"
+    id: boiler_enable
+    optimistic: true
+    turn_on_action:
+      - modbus_tcp.write_register:
+          id: modbus_device
+          register: 103
+          value: 1
+    turn_off_action:
+      - modbus_tcp.write_register:
+          id: modbus_device
+          register: 103
+          value: 0
+
+# Example: Write multiple values at once
+button:
+  - platform: template
+    name: "Send Boiler Config"
+    on_press:
+      then:
+        - modbus_tcp.write_multiple_registers:
+            id: modbus_device
+            register: 200
+            values: [250, 300, 1, 0]  # Temp setpoint, max temp, mode, spare
+
+# Advanced automation example
+automation:
+  - trigger:
+      platform: numeric_state
+      entity_id: sensor.ai1_logo_temperature
+      above: 25.0
+    action:
+      - logger.log: "Temperature above 25°C, reducing setpoint"
+      - modbus_tcp.write_register:
+          id: modbus_device
+          register: 101
+          value: 200  # 20.0°C scaled by 10
