@@ -80,7 +80,7 @@ public:
             start_connection_check();  // Start non-blocking check
         }
         
-        // Process connection check state machine (non-blocking)
+        // Process connection check state machine (non-blocking, max 5ms per call)
         process_connection_check();
         
         // Watchdog handling
@@ -88,8 +88,8 @@ public:
             handle_watchdog();
         }
         
-        // Yield regularly for responsiveness during high-frequency operations
-        if (now % 10 == 0) {  // More frequent yielding
+        // Yield regularly for responsiveness
+        if (now % 10 == 0) {
             yield();
         }
     }
@@ -104,23 +104,13 @@ public:
         is_connected_ = false; 
     }
 
-    // Public connection check method
+    // Public connection check method (now also non-blocking)
     void check_connection() {
-        ESP_LOGV(TAG, "Checking Modbus connection to %s:%d", host_.c_str(), port_);
-        
-        int sock = create_connection();
-        if (sock >= 0) {
-            ::close(sock);
-            if (!is_connected_) {
-                ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
-                is_connected_ = true;
-            }
-        } else {
-            if (is_connected_) {
-                ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
-                is_connected_ = false;
-            }
+        // If already checking, don't start another
+        if (connection_check_state_ != ConnectionCheckState::IDLE) {
+            return;
         }
+        start_connection_check();
     }
 
     // Read single register
@@ -140,10 +130,8 @@ public:
             return response;
         }
 
-        // Build request
         std::vector<uint8_t> request = build_read_request(start_address, count, function);
         
-        // Send with timeout protection
         if (!send_data(sock, request)) {
             ::close(sock);
             response.error_message = "Send failed";
@@ -151,7 +139,6 @@ public:
             return response;
         }
 
-        // Receive response
         std::vector<uint8_t> resp_data = receive_data(sock);
         ::close(sock);
 
@@ -161,7 +148,6 @@ public:
             return response;
         }
 
-        // Parse response
         if (!parse_read_response(resp_data, response, function)) {
             is_connected_ = false;
             return response;
@@ -253,35 +239,11 @@ private:
     uint16_t watchdog_counter_;
     bool safe_mode_active_;
     
-    // Safe mode configuration
-    struct SafeModeRegister {
-        uint16_t register_addr;
-        int16_t value;
-    };
-    std::vector<SafeModeRegister> safe_mode_registers_;
-
-private:
-    std::string host_;
-    uint16_t port_;
-    uint8_t unit_id_;
-    bool is_connected_;
-    uint32_t last_connection_attempt_;
-    uint16_t transaction_id_ = 1;
-    
-    // Watchdog variables
-    uint16_t watchdog_register_;
-    bool watchdog_enabled_;
-    uint32_t watchdog_interval_;
-    uint32_t last_watchdog_time_;
-    uint16_t watchdog_counter_;
-    bool safe_mode_active_;
-    
     // Non-blocking connection check state machine
     enum class ConnectionCheckState {
         IDLE,
         CONNECTING,
         CONNECTED,
-        TESTING,
         CLEANUP
     };
     ConnectionCheckState connection_check_state_;
@@ -374,7 +336,6 @@ private:
                     ESP_LOGV(TAG, "Connection check timeout");
                     connection_check_state_ = ConnectionCheckState::CLEANUP;
                 }
-                // else: still connecting, check again next loop
                 break;
             }
             
@@ -406,6 +367,8 @@ private:
             }
         }
     }
+
+    void handle_watchdog() {
         last_watchdog_time_ = millis();
         
         if (!is_connected_) {
@@ -419,17 +382,15 @@ private:
         bool write_success = write_register(watchdog_register_, watchdog_counter_);
         
         if (write_success) {
-            // Read back the watchdog register after a short delay
             delay(100);
             ModbusResponse response = read_register(watchdog_register_);
             
             if (response.success && !response.data.empty()) {
                 uint16_t read_value = response.data[0];
                 
-                // Check if remote device toggled the watchdog (incremented it)
                 if (read_value != watchdog_counter_) {
                     ESP_LOGD(TAG, "Watchdog OK: wrote %d, read %d", watchdog_counter_, read_value);
-                    watchdog_counter_ = read_value;  // Sync with remote value
+                    watchdog_counter_ = read_value;
                     
                     if (safe_mode_active_) {
                         ESP_LOGI(TAG, "Watchdog restored, deactivating safe mode");
@@ -450,12 +411,11 @@ private:
     }
     
     void activate_safe_mode() {
-        if (safe_mode_active_) return;  // Already in safe mode
+        if (safe_mode_active_) return;
         
         ESP_LOGW(TAG, "Activating safe mode - writing %d safe values", safe_mode_registers_.size());
         safe_mode_active_ = true;
         
-        // Write all configured safe mode values
         for (const auto& safe_reg : safe_mode_registers_) {
             write_register(safe_reg.register_addr, safe_reg.value);
             ESP_LOGI(TAG, "Safe mode: Set register %d = %d", safe_reg.register_addr, safe_reg.value);
@@ -469,14 +429,10 @@ private:
             return -1;
         }
 
-        // Set socket to non-blocking mode first
-        int flags = ::fcntl(sock, F_GETFL, 0);
-        ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-        // Extremely short timeouts for high-frequency polling
+        // Very short timeouts for 1-second polling
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 200000;  // 200ms timeout (very short)
+        timeout.tv_usec = 200000;  // 200ms timeout
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -484,7 +440,6 @@ private:
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(port_);
         
-        // Use cached IP if possible to avoid DNS delays
         if (::inet_aton(host_.c_str(), &server_addr.sin_addr) == 0) {
             struct hostent *he = ::gethostbyname(host_.c_str());
             if (he == nullptr) {
@@ -495,44 +450,11 @@ private:
             memcpy(&server_addr.sin_addr, he->h_addr, sizeof(server_addr.sin_addr));
         }
 
-        // Non-blocking connect with immediate timeout check
-        int connect_result = ::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
-        if (connect_result < 0) {
-            if (errno == EINPROGRESS) {
-                // Connection in progress, use select with short timeout
-                fd_set write_fds;
-                FD_ZERO(&write_fds);
-                FD_SET(sock, &write_fds);
-                
-                struct timeval connect_timeout;
-                connect_timeout.tv_sec = 0;
-                connect_timeout.tv_usec = 200000;  // 200ms max wait
-                
-                int select_result = ::select(sock + 1, nullptr, &write_fds, nullptr, &connect_timeout);
-                if (select_result <= 0) {
-                    ESP_LOGV(TAG, "Connection timeout to %s:%d", host_.c_str(), port_);
-                    ::close(sock);
-                    return -1;
-                }
-                
-                // Check if connection actually succeeded
-                int error = 0;
-                socklen_t len = sizeof(error);
-                ::getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
-                if (error != 0) {
-                    ESP_LOGV(TAG, "Connection failed to %s:%d (error: %d)", host_.c_str(), port_, error);
-                    ::close(sock);
-                    return -1;
-                }
-            } else {
-                ESP_LOGV(TAG, "Immediate connection failure to %s:%d", host_.c_str(), port_);
-                ::close(sock);
-                return -1;
-            }
+        if (::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            ESP_LOGV(TAG, "Connection failed to %s:%d", host_.c_str(), port_);
+            ::close(sock);
+            return -1;
         }
-
-        // Set back to blocking mode for data transfer
-        ::fcntl(sock, F_SETFL, flags);
 
         ESP_LOGVV(TAG, "Connected to %s:%d", host_.c_str(), port_);
         return sock;
@@ -561,31 +483,31 @@ private:
 
     std::vector<uint8_t> build_read_request(uint16_t address, uint16_t count, ModbusFunction function) {
         return {
-            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),  // Transaction ID High
-            static_cast<uint8_t>(transaction_id_++ & 0xFF),      // Transaction ID Low
-            0x00, 0x00,  // Protocol ID
-            0x00, 0x06,  // Length
-            unit_id_,    // Unit ID
-            static_cast<uint8_t>(function),  // Function Code
-            static_cast<uint8_t>((address >> 8) & 0xFF),   // Address High
-            static_cast<uint8_t>(address & 0xFF),          // Address Low
-            static_cast<uint8_t>((count >> 8) & 0xFF),     // Count High
-            static_cast<uint8_t>(count & 0xFF)             // Count Low
+            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),
+            static_cast<uint8_t>(transaction_id_++ & 0xFF),
+            0x00, 0x00,
+            0x00, 0x06,
+            unit_id_,
+            static_cast<uint8_t>(function),
+            static_cast<uint8_t>((address >> 8) & 0xFF),
+            static_cast<uint8_t>(address & 0xFF),
+            static_cast<uint8_t>((count >> 8) & 0xFF),
+            static_cast<uint8_t>(count & 0xFF)
         };
     }
 
     std::vector<uint8_t> build_write_request(uint16_t address, int16_t value) {
         return {
-            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),  // Transaction ID High
-            static_cast<uint8_t>(transaction_id_++ & 0xFF),      // Transaction ID Low
-            0x00, 0x00,  // Protocol ID
-            0x00, 0x06,  // Length
-            unit_id_,    // Unit ID
-            0x06,        // Function Code (Write Single Register)
-            static_cast<uint8_t>((address >> 8) & 0xFF),   // Address High
-            static_cast<uint8_t>(address & 0xFF),          // Address Low
-            static_cast<uint8_t>((value >> 8) & 0xFF),     // Value High
-            static_cast<uint8_t>(value & 0xFF)             // Value Low
+            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),
+            static_cast<uint8_t>(transaction_id_++ & 0xFF),
+            0x00, 0x00,
+            0x00, 0x06,
+            unit_id_,
+            0x06,
+            static_cast<uint8_t>((address >> 8) & 0xFF),
+            static_cast<uint8_t>(address & 0xFF),
+            static_cast<uint8_t>((value >> 8) & 0xFF),
+            static_cast<uint8_t>(value & 0xFF)
         };
     }
 
@@ -594,24 +516,23 @@ private:
         uint8_t byte_count = count * 2;
         
         std::vector<uint8_t> request = {
-            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),  // Transaction ID High
-            static_cast<uint8_t>(transaction_id_++ & 0xFF),      // Transaction ID Low
-            0x00, 0x00,  // Protocol ID
-            static_cast<uint8_t>(((7 + byte_count) >> 8) & 0xFF),  // Length High
-            static_cast<uint8_t>((7 + byte_count) & 0xFF),        // Length Low
-            unit_id_,    // Unit ID
-            0x10,        // Function Code (Write Multiple Registers)
-            static_cast<uint8_t>((address >> 8) & 0xFF),   // Address High
-            static_cast<uint8_t>(address & 0xFF),          // Address Low
-            static_cast<uint8_t>((count >> 8) & 0xFF),     // Count High
-            static_cast<uint8_t>(count & 0xFF),            // Count Low
-            byte_count   // Byte Count
+            static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),
+            static_cast<uint8_t>(transaction_id_++ & 0xFF),
+            0x00, 0x00,
+            static_cast<uint8_t>(((7 + byte_count) >> 8) & 0xFF),
+            static_cast<uint8_t>((7 + byte_count) & 0xFF),
+            unit_id_,
+            0x10,
+            static_cast<uint8_t>((address >> 8) & 0xFF),
+            static_cast<uint8_t>(address & 0xFF),
+            static_cast<uint8_t>((count >> 8) & 0xFF),
+            static_cast<uint8_t>(count & 0xFF),
+            byte_count
         };
         
-        // Add values
         for (int16_t value : values) {
-            request.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));  // High byte
-            request.push_back(static_cast<uint8_t>(value & 0xFF));         // Low byte
+            request.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+            request.push_back(static_cast<uint8_t>(value & 0xFF));
         }
         
         return request;
@@ -634,7 +555,6 @@ private:
             return false;
         }
 
-        // Parse register values
         response.data.clear();
         for (int i = 0; i < byte_count; i += 2) {
             uint16_t value = (data[9 + i] << 8) | data[9 + i + 1];
@@ -660,7 +580,6 @@ public:
     }
 
     void update() override {
-        // Force connection check on every sensor update for faster detection
         if (!parent_->is_connected()) {
             ESP_LOGV(TAG, "Triggering connection check for register %d", register_address_);
             const_cast<ModbusTCPManager*>(parent_)->check_connection();
@@ -675,7 +594,6 @@ public:
         static uint32_t last_any_update = 0;
         uint32_t now = millis();
         
-        // Ensure minimum 200ms between ANY sensor updates (to help OpenTherm)
         if (now - last_any_update < 200) {
             ESP_LOGV(TAG, "Rate limiting sensor %d, skipping update", register_address_);
             return;
@@ -700,7 +618,6 @@ public:
             const_cast<ModbusTCPManager*>(parent_)->mark_connection_failed();
         }
         
-        // Always yield after Modbus operations
         yield();
     }
 
