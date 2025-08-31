@@ -8,25 +8,21 @@ wifi:
   password: "your_password"
   fast_connect: true
   power_save_mode: none
-  # Prevent WiFi disconnects during Modbus issues
   reboot_timeout: 0s
 
 logger:
   level: INFO
   logs:
-    modbus_tcp_manager: WARN  # Reduce modbus logging to prevent spam
+    modbus_tcp_manager: WARN
 
 api:
   encryption:
     key: "your_api_key"
-  # Prevent API disconnects during component issues
   reboot_timeout: 0s
-  password: ""
 
 ota:
   password: "your_ota_password"
 
-# Enable watchdog to prevent total system hangs
 esp32:
   board: esp32dev
   framework:
@@ -37,14 +33,12 @@ external_components:
     components: [modbus_tcp_manager]
     refresh: 0s
 
-# Modbus manager with very conservative settings
 modbus_tcp_manager:
   id: modbus_device
   host: "192.168.0.3"
   port: 502
   unit_id: 1
 
-# Connection status monitoring
 binary_sensor:
   - platform: modbus_tcp_manager
     modbus_tcp_id: modbus_device
@@ -52,7 +46,6 @@ binary_sensor:
     id: modbus_connection
     device_class: connectivity
 
-# Temperature sensors with staggered updates to reduce load
 sensor:
   - platform: modbus_tcp_manager
     modbus_tcp_id: modbus_device
@@ -61,7 +54,7 @@ sensor:
     register_address: 0
     function_code: 4
     scale: 0.1
-    update_interval: 2s  # Slightly slower to reduce ESP32 load
+    update_interval: 2s
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
@@ -73,12 +66,11 @@ sensor:
     register_address: 591
     function_code: 3
     scale: 0.1
-    update_interval: 3s  # Staggered timing
+    update_interval: 3s
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
 
-  # Local sensor with safe write logic
   - platform: dallas
     name: "Local Boiler Temperature"
     id: local_boiler_temp
@@ -87,14 +79,13 @@ sensor:
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
-    # Safe on-demand write with error handling
     on_value:
       then:
         - if:
             condition:
               and:
                 - binary_sensor.is_on: modbus_connection
-                - lambda: 'return !isnan(x);'  # Valid value
+                - lambda: 'return !isnan(x);'
             then:
               - lambda: |-
                   try {
@@ -108,7 +99,6 @@ sensor:
                     ESP_LOGW("main", "Exception during Modbus write");
                   }
 
-# Manual controls with safe write logic
 number:
   - platform: template
     name: "Boiler Setpoint"
@@ -118,7 +108,6 @@ number:
     step: 0.5
     optimistic: true
     unit_of_measurement: "°C"
-    # Safe immediate write
     set_action:
       then:
         - if:
@@ -139,12 +128,36 @@ number:
             else:
               - logger.log: "Cannot write setpoint - Modbus offline"
 
+  - platform: template
+    name: "System Mode"
+    id: system_mode
+    min_value: 0
+    max_value: 5
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: modbus_connection
+            then:
+              - lambda: |-
+                  try {
+                    auto *modbus = id(modbus_device);
+                    int16_t mode_value = (int16_t)x;
+                    bool success = modbus->write_register(503, mode_value);
+                    if (success) {
+                      ESP_LOGI("main", "Set mode: %d", mode_value);
+                    }
+                  } catch (...) {
+                    ESP_LOGW("main", "Exception during mode write");
+                  }
+
 switch:
   - platform: template
     name: "Boiler Enable"
     id: boiler_enable
     optimistic: true
-    # Safe on/off with connection check
     turn_on_action:
       - if:
           condition:
@@ -161,7 +174,7 @@ switch:
                   ESP_LOGW("main", "Exception during boiler ON");
                 }
           else:
-            - logger.log: "Cannot turn on boiler - Modbus offline"
+            - logger.log: "Cannot turn on - Modbus offline"
     turn_off_action:
       - lambda: |-
           try {
@@ -174,7 +187,6 @@ switch:
             ESP_LOGW("main", "Exception during boiler OFF");
           }
 
-# System status with connection monitoring
 text_sensor:
   - platform: template
     name: "System Status"
@@ -182,19 +194,18 @@ text_sensor:
     update_interval: 5s
     lambda: |-
       if (!id(modbus_connection).state) {
-        return {"Modbus Offline - Safe Mode"};
+        return {"Modbus Offline"};
       } else if (isnan(id(ai1_temp).state) && isnan(id(am64_temp).state)) {
-        return {"No Data Available"};
+        return {"No Data"};
       } else if (id(boiler_enable).state) {
         return {"Running - " + to_string(id(boiler_setpoint).state) + "°C"};
       } else {
         return {"Standby"};
       }
 
-# Less frequent bulk operations to reduce load
 button:
   - platform: template
-    name: "Send Settings (Safe)"
+    name: "Send Settings"
     on_press:
       then:
         - if:
@@ -216,13 +227,12 @@ button:
                     ESP_LOGW("main", "Exception during bulk write");
                   }
             else:
-              - logger.log: "Cannot send settings - Modbus offline"
+              - logger.log: "Cannot send - Modbus offline"
 
-# Monitor system health
 interval:
-  - interval: 30s
+  - interval: 60s
     then:
       - lambda: |-
-          ESP_LOGI("health", "ESP32 responsive | Modbus: %s | Free heap: %d", 
-                   id(modbus_connection).state ? "OK" : "OFFLINE", 
-                   ESP.getFreeHeap());
+          ESP_LOGI("health", "ESP32 OK | Heap: %d | Modbus: %s", 
+                   ESP.getFreeHeap(),
+                   id(modbus_connection).state ? "OK" : "OFFLINE");
