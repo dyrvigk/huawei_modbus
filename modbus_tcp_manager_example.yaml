@@ -54,7 +54,7 @@ sensor:
     register_address: 0
     function_code: 4
     scale: 0.1
-    update_interval: 2s
+    update_interval: 5s  # Slower to reduce OpenTherm interference
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
@@ -66,7 +66,7 @@ sensor:
     register_address: 591
     function_code: 3
     scale: 0.1
-    update_interval: 3s
+    update_interval: 7s  # Staggered timing
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
@@ -75,7 +75,7 @@ sensor:
     name: "Local Boiler Temperature"
     id: local_boiler_temp
     address: 0x1C0000031EDD2A28
-    update_interval: 2s
+    update_interval: 3s  # Slower updates
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
@@ -87,6 +87,7 @@ sensor:
                 - binary_sensor.is_on: modbus_connection
                 - lambda: 'return !isnan(x);'
             then:
+              - delay: 100ms  # Small delay before Modbus write
               - lambda: |-
                   auto *modbus = id(modbus_device);
                   if (modbus != nullptr) {
@@ -230,7 +231,7 @@ button:
               - logger.log: "Cannot send - Modbus offline"
 
 interval:
-  - interval: 60s
+  - interval: 10s
     then:
       - lambda: |-
           ESP_LOGI("health", "ESP32 OK | Heap: %d | Modbus: %s", 
