@@ -49,7 +49,8 @@ public:
           watchdog_interval_(10000), last_watchdog_time_(0),
           watchdog_counter_(0), safe_mode_active_(false),
           connection_check_state_(ConnectionCheckState::IDLE),
-          connection_check_sock_(-1), connection_check_start_time_(0) {}
+          connection_check_sock_(-1), connection_check_start_time_(0),
+          connection_check_success_(false) {}
 
     void setup() override {
         ESP_LOGD(TAG, "Setting up Modbus TCP Manager for %s:%d", host_.c_str(), port_);
@@ -243,12 +244,12 @@ private:
     enum class ConnectionCheckState {
         IDLE,
         CONNECTING,
-        CONNECTED,
         CLEANUP
     };
     ConnectionCheckState connection_check_state_;
     int connection_check_sock_;
     uint32_t connection_check_start_time_;
+    bool connection_check_success_;  // Track whether the check succeeded
     
     // Safe mode configuration
     struct SafeModeRegister {
@@ -266,6 +267,7 @@ private:
         ESP_LOGV(TAG, "Starting non-blocking connection check");
         connection_check_state_ = ConnectionCheckState::CONNECTING;
         connection_check_start_time_ = millis();
+        connection_check_success_ = false;
         
         // Create socket
         connection_check_sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -288,15 +290,14 @@ private:
         int result = ::connect(connection_check_sock_, (struct sockaddr*)&server_addr, sizeof(server_addr));
         if (result == 0) {
             // Immediate connection success
-            connection_check_state_ = ConnectionCheckState::CONNECTED;
-        } else if (errno == EINPROGRESS) {
-            // Connection in progress - will check in process_connection_check()
-            connection_check_state_ = ConnectionCheckState::CONNECTING;
-        } else {
+            connection_check_success_ = true;
+            connection_check_state_ = ConnectionCheckState::CLEANUP;
+        } else if (errno != EINPROGRESS) {
             // Immediate failure
             ESP_LOGV(TAG, "Connection check failed immediately");
             connection_check_state_ = ConnectionCheckState::CLEANUP;
         }
+        // If errno == EINPROGRESS, we stay in CONNECTING state
     }
     
     // Process connection check state machine (max 5ms per call)
@@ -325,41 +326,50 @@ private:
                     if (FD_ISSET(connection_check_sock_, &error_fds)) {
                         // Connection failed
                         ESP_LOGV(TAG, "Connection check failed (error fd set)");
+                        connection_check_success_ = false;
                         connection_check_state_ = ConnectionCheckState::CLEANUP;
                     } else if (FD_ISSET(connection_check_sock_, &write_fds)) {
-                        // Connection succeeded
-                        ESP_LOGV(TAG, "Connection check succeeded");
-                        connection_check_state_ = ConnectionCheckState::CONNECTED;
+                        // Check if connection actually succeeded
+                        int error = 0;
+                        socklen_t len = sizeof(error);
+                        ::getsockopt(connection_check_sock_, SOL_SOCKET, SO_ERROR, &error, &len);
+                        
+                        if (error == 0) {
+                            ESP_LOGV(TAG, "Connection check succeeded");
+                            connection_check_success_ = true;
+                        } else {
+                            ESP_LOGV(TAG, "Connection check failed (socket error: %d)", error);
+                            connection_check_success_ = false;
+                        }
+                        connection_check_state_ = ConnectionCheckState::CLEANUP;
                     }
                 } else if (now - connection_check_start_time_ > 500) {
                     // Timeout after 500ms
                     ESP_LOGV(TAG, "Connection check timeout");
+                    connection_check_success_ = false;
                     connection_check_state_ = ConnectionCheckState::CLEANUP;
                 }
                 break;
             }
             
-            case ConnectionCheckState::CONNECTED: {
-                // Connection successful - update status
-                if (!is_connected_) {
-                    ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
-                    is_connected_ = true;
-                }
-                connection_check_state_ = ConnectionCheckState::CLEANUP;
-                break;
-            }
-            
             case ConnectionCheckState::CLEANUP: {
-                // Clean up and determine final status
+                // Clean up and update status based on success flag
                 if (connection_check_sock_ >= 0) {
                     ::close(connection_check_sock_);
                     connection_check_sock_ = -1;
                 }
                 
-                // If we didn't reach CONNECTED state, mark as failed
-                if (connection_check_state_ != ConnectionCheckState::CONNECTED && is_connected_) {
-                    ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
-                    is_connected_ = false;
+                // Update connection status based on the check result
+                if (connection_check_success_) {
+                    if (!is_connected_) {
+                        ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
+                        is_connected_ = true;
+                    }
+                } else {
+                    if (is_connected_) {
+                        ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
+                        is_connected_ = false;
+                    }
                 }
                 
                 connection_check_state_ = ConnectionCheckState::IDLE;
