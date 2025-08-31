@@ -98,8 +98,8 @@ public:
     void mark_connection_failed() { 
         is_connected_ = false; 
     }
-    
-    // Public method to force connection check
+
+    // Public connection check method
     void check_connection() {
         ESP_LOGV(TAG, "Checking Modbus connection to %s:%d", host_.c_str(), port_);
         
@@ -409,24 +409,6 @@ private:
         return data;
     }
 
-    void check_connection() {
-        ESP_LOGV(TAG, "Checking Modbus connection...");
-        
-        int sock = create_connection();
-        if (sock >= 0) {
-            ::close(sock);
-            if (!is_connected_) {
-                ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
-                is_connected_ = true;
-            }
-        } else {
-            if (is_connected_) {
-                ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
-                is_connected_ = false;
-            }
-        }
-    }
-
     std::vector<uint8_t> build_read_request(uint16_t address, uint16_t count, ModbusFunction function) {
         return {
             static_cast<uint8_t>((transaction_id_ >> 8) & 0xFF),  // Transaction ID High
@@ -583,7 +565,7 @@ private:
 class ModbusTCPConnectionSensor : public PollingComponent, public binary_sensor::BinarySensor {
 public:
     ModbusTCPConnectionSensor(ModbusTCPManager *parent) : parent_(parent) {
-        this->set_update_interval(2000);  // Check every 2 seconds
+        this->set_update_interval(1000);  // Check every 1 second for faster response
     }
 
     void setup() override {
