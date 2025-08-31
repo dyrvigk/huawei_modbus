@@ -513,7 +513,6 @@ public:
         // Force connection check on every sensor update for faster detection
         if (!parent_->is_connected()) {
             ESP_LOGV(TAG, "Triggering connection check for register %d", register_address_);
-            // Don't wait for the loop() - check now
             const_cast<ModbusTCPManager*>(parent_)->check_connection();
             
             if (!parent_->is_connected()) {
@@ -522,22 +521,26 @@ public:
             }
         }
 
-        // Add small delay between sensor updates to reduce load
+        // Stagger sensor updates more to reduce OpenTherm interference
         static uint32_t last_update = 0;
+        static uint8_t sensor_counter = 0;
         uint32_t now = millis();
-        if (now - last_update < 50) {  // Minimum 50ms between any sensor updates
-            delay(50 - (now - last_update));
+        
+        // Add random offset based on register address to stagger updates
+        uint32_t offset = (register_address_ % 10) * 100;  // 0-900ms offset
+        if (now - last_update < 1000 + offset) {  // At least 1 second + offset between updates
+            return;  // Skip this update cycle
         }
-        last_update = millis();
+        last_update = now;
 
         ModbusFunction func = (function_code_ == 4) ? 
             ModbusFunction::READ_INPUT_REGISTERS : 
             ModbusFunction::READ_HOLDING_REGISTERS;
 
+        ESP_LOGV(TAG, "Reading register %d (offset: %dms)", register_address_, offset);
         ModbusResponse response = parent_->read_register(register_address_, func);
         
         if (response.success && !response.data.empty()) {
-            // Convert uint16 to int16 for proper signed handling
             int16_t raw_value = static_cast<int16_t>(response.data[0]);
             float scaled_value = (raw_value * scale_) + offset_;
             
@@ -545,12 +548,12 @@ public:
             this->publish_state(scaled_value);
         } else {
             ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
-            // Mark connection as failed if read fails
             const_cast<ModbusTCPManager*>(parent_)->mark_connection_failed();
         }
         
-        // Yield after each sensor update
+        // Always yield after Modbus operations
         yield();
+        delay(10);  // Extra delay to help OpenTherm
     }
 
 private:
