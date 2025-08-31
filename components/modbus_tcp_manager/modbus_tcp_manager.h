@@ -101,7 +101,7 @@ public:
     
     // Public method to force connection check
     void check_connection() {
-        ESP_LOGV(TAG, "Periodic connection check...");
+        ESP_LOGV(TAG, "Checking Modbus connection to %s:%d", host_.c_str(), port_);
         
         int sock = create_connection();
         if (sock >= 0) {
