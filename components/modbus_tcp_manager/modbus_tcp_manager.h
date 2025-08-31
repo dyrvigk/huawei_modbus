@@ -521,23 +521,22 @@ public:
             }
         }
 
-        // Stagger sensor updates more to reduce OpenTherm interference
-        static uint32_t last_update = 0;
-        static uint8_t sensor_counter = 0;
+        // Simple rate limiting to prevent all sensors updating simultaneously
+        static uint32_t last_any_update = 0;
         uint32_t now = millis();
         
-        // Add random offset based on register address to stagger updates
-        uint32_t offset = (register_address_ % 10) * 100;  // 0-900ms offset
-        if (now - last_update < 1000 + offset) {  // At least 1 second + offset between updates
-            return;  // Skip this update cycle
+        // Ensure minimum 200ms between ANY sensor updates (to help OpenTherm)
+        if (now - last_any_update < 200) {
+            ESP_LOGV(TAG, "Rate limiting sensor %d, skipping update", register_address_);
+            return;
         }
-        last_update = now;
+        last_any_update = now;
 
         ModbusFunction func = (function_code_ == 4) ? 
             ModbusFunction::READ_INPUT_REGISTERS : 
             ModbusFunction::READ_HOLDING_REGISTERS;
 
-        ESP_LOGV(TAG, "Reading register %d (offset: %dms)", register_address_, offset);
+        ESP_LOGD(TAG, "Reading register %d", register_address_);
         ModbusResponse response = parent_->read_register(register_address_, func);
         
         if (response.success && !response.data.empty()) {
@@ -547,13 +546,12 @@ public:
             ESP_LOGD(TAG, "Register %d: raw=%d, scaled=%.2f", register_address_, raw_value, scaled_value);
             this->publish_state(scaled_value);
         } else {
-            ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
+            ESP_LOGW(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
             const_cast<ModbusTCPManager*>(parent_)->mark_connection_failed();
         }
         
         // Always yield after Modbus operations
         yield();
-        delay(10);  // Extra delay to help OpenTherm
     }
 
 private:
