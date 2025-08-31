@@ -2,6 +2,8 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/automation.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include <string>
@@ -80,7 +82,7 @@ public:
             handle_watchdog();
         }
         
-        // Yield regularly for responsiveness
+        // Yield regularly for responsiveness during high-frequency operations
         if (now % 50 == 0) {
             yield();
         }
@@ -446,8 +448,75 @@ private:
     }
 };
 
+// Sensor class
+class ModbusTCPSensor : public PollingComponent, public sensor::Sensor {
+public:
+    ModbusTCPSensor(ModbusTCPManager *parent, uint16_t register_address, 
+                    uint8_t function_code, float scale, float offset, uint32_t update_interval) 
+        : parent_(parent), register_address_(register_address), 
+          function_code_(function_code), scale_(scale), offset_(offset) {
+        this->set_update_interval(update_interval);
+    }
+
+    void setup() override {
+        ESP_LOGD(TAG, "Setting up Modbus sensor for register %d", register_address_);
+    }
+
+    void update() override {
+        if (!parent_->is_connected()) {
+            ESP_LOGV(TAG, "Modbus not connected, skipping update for register %d", register_address_);
+            return;
+        }
+
+        ModbusFunction func = (function_code_ == 4) ? 
+            ModbusFunction::READ_INPUT_REGISTERS : 
+            ModbusFunction::READ_HOLDING_REGISTERS;
+
+        ModbusResponse response = parent_->read_register(register_address_, func);
+        
+        if (response.success && !response.data.empty()) {
+            // Convert uint16 to int16 for proper signed handling
+            int16_t raw_value = static_cast<int16_t>(response.data[0]);
+            float scaled_value = (raw_value * scale_) + offset_;
+            
+            ESP_LOGD(TAG, "Register %d: raw=%d, scaled=%.2f", register_address_, raw_value, scaled_value);
+            this->publish_state(scaled_value);
+        } else {
+            ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
+        }
+    }
+
+private:
+    ModbusTCPManager *parent_;
+    uint16_t register_address_;
+    uint8_t function_code_;
+    float scale_;
+    float offset_;
+};
+
+// Connection status sensor
+class ModbusTCPConnectionSensor : public PollingComponent, public binary_sensor::BinarySensor {
+public:
+    ModbusTCPConnectionSensor(ModbusTCPManager *parent) : parent_(parent) {
+        this->set_update_interval(2000);  // Check every 2 seconds
+    }
+
+    void setup() override {
+        ESP_LOGD(TAG, "Setting up Modbus connection status sensor");
+    }
+
+    void update() override {
+        bool connected = parent_->is_connected();
+        this->publish_state(connected);
+        ESP_LOGV(TAG, "Modbus connection status: %s", connected ? "Connected" : "Disconnected");
+    }
+
+private:
+    ModbusTCPManager *parent_;
+};
+
 // Action classes for automation
-template<typename... Ts> class ModbusTCPWriteAction : public Action<Ts...> {
+template<typename... Ts> class ModbusTCPWriteAction : public automation::Action<Ts...> {
 public:
     ModbusTCPWriteAction(ModbusTCPManager *parent) : parent_(parent) {}
     
@@ -468,7 +537,7 @@ private:
     ModbusTCPManager *parent_;
 };
 
-template<typename... Ts> class ModbusTCPWriteMultipleAction : public Action<Ts...> {
+template<typename... Ts> class ModbusTCPWriteMultipleAction : public automation::Action<Ts...> {
 public:
     ModbusTCPWriteMultipleAction(ModbusTCPManager *parent) : parent_(parent) {}
     
