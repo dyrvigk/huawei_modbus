@@ -41,18 +41,48 @@ class ModbusTCPManager : public Component {
 public:
     ModbusTCPManager(const std::string &host, uint16_t port, uint8_t unit_id) 
         : host_(host), port_(port), unit_id_(unit_id), 
-          is_connected_(false), last_connection_attempt_(0) {}
+          is_connected_(false), last_connection_attempt_(0),
+          watchdog_register_(0), watchdog_enabled_(false), 
+          watchdog_interval_(10000), last_watchdog_time_(0),
+          watchdog_counter_(0), safe_mode_active_(false) {}
 
     void setup() override {
         ESP_LOGD(TAG, "Setting up Modbus TCP Manager for %s:%d", host_.c_str(), port_);
     }
 
+    // Configuration methods
+    void set_watchdog_register(uint16_t reg) { 
+        watchdog_register_ = reg; 
+        watchdog_enabled_ = true;
+        ESP_LOGD(TAG, "Watchdog enabled on register %d", reg);
+    }
+    
+    void set_watchdog_interval(uint32_t interval) { 
+        watchdog_interval_ = interval; 
+    }
+    
+    void add_safe_mode_register(uint16_t reg, int16_t value) {
+        safe_mode_registers_.push_back({reg, value});
+        ESP_LOGD(TAG, "Added safe mode: register %d = %d", reg, value);
+    }
+
     void loop() override {
-        // Periodic connection health check (every 30 seconds)
         uint32_t now = millis();
-        if (now - last_connection_attempt_ > 30000) {
+        
+        // Connection health check
+        if (now - last_connection_attempt_ > 10000) {
             last_connection_attempt_ = now;
             check_connection();
+        }
+        
+        // Watchdog handling
+        if (watchdog_enabled_ && now - last_watchdog_time_ > watchdog_interval_) {
+            handle_watchdog();
+        }
+        
+        // Yield regularly for responsiveness
+        if (now % 50 == 0) {
+            yield();
         }
     }
 
@@ -182,6 +212,78 @@ private:
     bool is_connected_;
     uint32_t last_connection_attempt_;
     uint16_t transaction_id_ = 1;
+    
+    // Watchdog variables
+    uint16_t watchdog_register_;
+    bool watchdog_enabled_;
+    uint32_t watchdog_interval_;
+    uint32_t last_watchdog_time_;
+    uint16_t watchdog_counter_;
+    bool safe_mode_active_;
+    
+    // Safe mode configuration
+    struct SafeModeRegister {
+        uint16_t register_addr;
+        int16_t value;
+    };
+    std::vector<SafeModeRegister> safe_mode_registers_;
+
+    void handle_watchdog() {
+        last_watchdog_time_ = millis();
+        
+        if (!is_connected_) {
+            ESP_LOGW(TAG, "Watchdog: Connection lost, activating safe mode");
+            activate_safe_mode();
+            return;
+        }
+        
+        // Write watchdog counter
+        watchdog_counter_++;
+        bool write_success = write_register(watchdog_register_, watchdog_counter_);
+        
+        if (write_success) {
+            // Read back the watchdog register after a short delay
+            delay(100);
+            ModbusResponse response = read_register(watchdog_register_);
+            
+            if (response.success && !response.data.empty()) {
+                uint16_t read_value = response.data[0];
+                
+                // Check if remote device toggled the watchdog (incremented it)
+                if (read_value != watchdog_counter_) {
+                    ESP_LOGD(TAG, "Watchdog OK: wrote %d, read %d", watchdog_counter_, read_value);
+                    watchdog_counter_ = read_value;  // Sync with remote value
+                    
+                    if (safe_mode_active_) {
+                        ESP_LOGI(TAG, "Watchdog restored, deactivating safe mode");
+                        safe_mode_active_ = false;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Watchdog failed: remote device not responding");
+                    activate_safe_mode();
+                }
+            } else {
+                ESP_LOGW(TAG, "Watchdog read failed");
+                activate_safe_mode();
+            }
+        } else {
+            ESP_LOGW(TAG, "Watchdog write failed");
+            activate_safe_mode();
+        }
+    }
+    
+    void activate_safe_mode() {
+        if (safe_mode_active_) return;  // Already in safe mode
+        
+        ESP_LOGW(TAG, "Activating safe mode - writing %d safe values", safe_mode_registers_.size());
+        safe_mode_active_ = true;
+        
+        // Write all configured safe mode values
+        for (const auto& safe_reg : safe_mode_registers_) {
+            write_register(safe_reg.register_addr, safe_reg.value);
+            ESP_LOGI(TAG, "Safe mode: Set register %d = %d", safe_reg.register_addr, safe_reg.value);
+        }
+    }
 
     int create_connection() {
         int sock = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -190,10 +292,10 @@ private:
             return -1;
         }
 
-        // Set short timeouts to prevent blocking
+        // Very short timeouts for 1-second polling
         struct timeval timeout;
-        timeout.tv_sec = 1;  // Very short timeout
-        timeout.tv_usec = 0;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 500000;  // 500ms timeout
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -217,7 +319,7 @@ private:
             return -1;
         }
 
-        ESP_LOGV(TAG, "Connected to %s:%d", host_.c_str(), port_);
+        ESP_LOGVV(TAG, "Connected to %s:%d", host_.c_str(), port_);
         return sock;
     }
 
@@ -342,75 +444,6 @@ private:
 
         return true;
     }
-};
-
-// Add this class to the modbus_tcp_manager.h file after ModbusTCPManager class
-
-class ModbusTCPSensor : public PollingComponent, public sensor::Sensor {
-public:
-    ModbusTCPSensor(ModbusTCPManager *parent, uint16_t register_address, 
-                    uint8_t function_code, float scale, float offset, uint32_t update_interval) 
-        : parent_(parent), register_address_(register_address), 
-          function_code_(function_code), scale_(scale), offset_(offset) {
-        this->set_update_interval(update_interval);
-    }
-
-    void setup() override {
-        ESP_LOGD(TAG, "Setting up Modbus sensor for register %d", register_address_);
-    }
-
-    void update() override {
-        if (!parent_->is_connected()) {
-            ESP_LOGV(TAG, "Modbus not connected, skipping update for register %d", register_address_);
-            // Don't publish NAN immediately, wait for reconnection
-            return;
-        }
-
-        ModbusFunction func = (function_code_ == 4) ? 
-            ModbusFunction::READ_INPUT_REGISTERS : 
-            ModbusFunction::READ_HOLDING_REGISTERS;
-
-        ModbusResponse response = parent_->read_register(register_address_, func);
-        
-        if (response.success && !response.data.empty()) {
-            // Convert uint16 to int16 for proper signed handling
-            int16_t raw_value = static_cast<int16_t>(response.data[0]);
-            float scaled_value = (raw_value * scale_) + offset_;
-            
-            ESP_LOGD(TAG, "Register %d: raw=%d, scaled=%.2f", register_address_, raw_value, scaled_value);
-            this->publish_state(scaled_value);
-        } else {
-            ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
-            // Don't publish NAN on temporary failures to avoid "unavailable" states
-        }
-    }
-
-private:
-    ModbusTCPManager *parent_;
-    uint16_t register_address_;
-    uint8_t function_code_;
-    float scale_;
-    float offset_;
-};
-
-class ModbusTCPConnectionSensor : public PollingComponent, public binary_sensor::BinarySensor {
-public:
-    ModbusTCPConnectionSensor(ModbusTCPManager *parent) : parent_(parent) {
-        this->set_update_interval(5000);  // Check every 5 seconds
-    }
-
-    void setup() override {
-        ESP_LOGD(TAG, "Setting up Modbus connection status sensor");
-    }
-
-    void update() override {
-        bool connected = parent_->is_connected();
-        this->publish_state(connected);
-        ESP_LOGV(TAG, "Modbus connection status: %s", connected ? "Connected" : "Disconnected");
-    }
-
-private:
-    ModbusTCPManager *parent_;
 };
 
 // Action classes for automation
