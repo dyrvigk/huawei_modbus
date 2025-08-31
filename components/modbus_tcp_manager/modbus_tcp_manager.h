@@ -72,8 +72,8 @@ public:
     void loop() override {
         uint32_t now = millis();
         
-        // Connection health check
-        if (now - last_connection_attempt_ > 10000) {
+        // More frequent connection health check for faster detection
+        if (now - last_connection_attempt_ > 5000) {  // Check every 5 seconds
             last_connection_attempt_ = now;
             check_connection();
         }
@@ -93,6 +93,30 @@ public:
 
     // Connection status
     bool is_connected() const { return is_connected_; }
+    
+    // Force connection status update (used by sensors)
+    void mark_connection_failed() { 
+        is_connected_ = false; 
+    }
+    
+    // Public method to force connection check
+    void check_connection() {
+        ESP_LOGV(TAG, "Periodic connection check...");
+        
+        int sock = create_connection();
+        if (sock >= 0) {
+            ::close(sock);
+            if (!is_connected_) {
+                ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
+                is_connected_ = true;
+            }
+        } else {
+            if (is_connected_) {
+                ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
+                is_connected_ = false;
+            }
+        }
+    }
 
     // Read single register
     ModbusResponse read_register(uint16_t address, ModbusFunction function = ModbusFunction::READ_HOLDING_REGISTERS) {
@@ -386,16 +410,18 @@ private:
     }
 
     void check_connection() {
+        ESP_LOGV(TAG, "Checking Modbus connection...");
+        
         int sock = create_connection();
         if (sock >= 0) {
             ::close(sock);
             if (!is_connected_) {
-                ESP_LOGI(TAG, "Modbus connection restored");
+                ESP_LOGI(TAG, "Modbus connection restored to %s:%d", host_.c_str(), port_);
                 is_connected_ = true;
             }
         } else {
             if (is_connected_) {
-                ESP_LOGW(TAG, "Modbus connection lost");
+                ESP_LOGW(TAG, "Modbus connection lost to %s:%d", host_.c_str(), port_);
                 is_connected_ = false;
             }
         }
@@ -502,9 +528,16 @@ public:
     }
 
     void update() override {
+        // Force connection check on every sensor update for faster detection
         if (!parent_->is_connected()) {
-            ESP_LOGV(TAG, "Modbus not connected, skipping update for register %d", register_address_);
-            return;
+            ESP_LOGV(TAG, "Triggering connection check for register %d", register_address_);
+            // Don't wait for the loop() - check now
+            const_cast<ModbusTCPManager*>(parent_)->check_connection();
+            
+            if (!parent_->is_connected()) {
+                ESP_LOGV(TAG, "Modbus still not connected, skipping update");
+                return;
+            }
         }
 
         // Add small delay between sensor updates to reduce load
@@ -530,7 +563,8 @@ public:
             this->publish_state(scaled_value);
         } else {
             ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
-            // Don't spam logs on connection failures
+            // Mark connection as failed if read fails
+            const_cast<ModbusTCPManager*>(parent_)->mark_connection_failed();
         }
         
         // Yield after each sensor update
