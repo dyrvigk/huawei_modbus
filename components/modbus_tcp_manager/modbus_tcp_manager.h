@@ -1,7 +1,6 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "esphome/core/automation.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/core/log.h"
@@ -513,57 +512,6 @@ public:
 
 private:
     ModbusTCPManager *parent_;
-};
-
-// Action classes for automation
-template<typename... Ts> class ModbusTCPWriteAction : public automation::Action<Ts...> {
-public:
-    ModbusTCPWriteAction(ModbusTCPManager *parent) : parent_(parent) {}
-    
-    TEMPLATABLE_VALUE(uint16_t, register)
-    TEMPLATABLE_VALUE(int16_t, value)
-
-    void play(Ts... x) override {
-        uint16_t reg = this->register_.value(x...);
-        int16_t val = this->value_.value(x...);
-        
-        bool success = parent_->write_register(reg, val);
-        if (!success) {
-            ESP_LOGW(TAG, "Write action failed for register %d", reg);
-        }
-    }
-
-private:
-    ModbusTCPManager *parent_;
-};
-
-template<typename... Ts> class ModbusTCPWriteMultipleAction : public automation::Action<Ts...> {
-public:
-    ModbusTCPWriteMultipleAction(ModbusTCPManager *parent) : parent_(parent) {}
-    
-    TEMPLATABLE_VALUE(uint16_t, register)
-    
-    void set_values(const std::vector<TemplatableValue<int16_t, Ts...>>& values) {
-        values_ = values;
-    }
-
-    void play(Ts... x) override {
-        uint16_t reg = this->register_.value(x...);
-        
-        std::vector<int16_t> values;
-        for (auto& val_template : values_) {
-            values.push_back(val_template.value(x...));
-        }
-        
-        bool success = parent_->write_registers(reg, values);
-        if (!success) {
-            ESP_LOGW(TAG, "Write multiple action failed for register %d", reg);
-        }
-    }
-
-private:
-    ModbusTCPManager *parent_;
-    std::vector<TemplatableValue<int16_t, Ts...>> values_;
 };
 
 }  // namespace modbus_tcp
