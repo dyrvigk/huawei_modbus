@@ -439,10 +439,14 @@ private:
             return -1;
         }
 
-        // Very short timeouts for 1-second polling
+        // Set socket to non-blocking mode FIRST
+        int flags = ::fcntl(sock, F_GETFL, 0);
+        ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+        // Very short timeouts for data operations
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 200000;  // 200ms timeout
+        timeout.tv_usec = 100000;  // 100ms timeout - even shorter
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -460,11 +464,44 @@ private:
             memcpy(&server_addr.sin_addr, he->h_addr, sizeof(server_addr.sin_addr));
         }
 
-        if (::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-            ESP_LOGV(TAG, "Connection failed to %s:%d", host_.c_str(), port_);
-            ::close(sock);
-            return -1;
+        // Non-blocking connect with timeout
+        int connect_result = ::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
+        if (connect_result < 0) {
+            if (errno == EINPROGRESS) {
+                // Connection in progress, wait with select()
+                fd_set write_fds;
+                FD_ZERO(&write_fds);
+                FD_SET(sock, &write_fds);
+                
+                struct timeval connect_timeout;
+                connect_timeout.tv_sec = 0;
+                connect_timeout.tv_usec = 100000;  // 100ms max wait - very short
+                
+                int select_result = ::select(sock + 1, nullptr, &write_fds, nullptr, &connect_timeout);
+                if (select_result <= 0) {
+                    ESP_LOGV(TAG, "Connection timeout to %s:%d", host_.c_str(), port_);
+                    ::close(sock);
+                    return -1;
+                }
+                
+                // Check if connection actually succeeded
+                int error = 0;
+                socklen_t len = sizeof(error);
+                ::getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
+                if (error != 0) {
+                    ESP_LOGV(TAG, "Connection failed to %s:%d (error: %d)", host_.c_str(), port_, error);
+                    ::close(sock);
+                    return -1;
+                }
+            } else {
+                ESP_LOGV(TAG, "Immediate connection failure to %s:%d", host_.c_str(), port_);
+                ::close(sock);
+                return -1;
+            }
         }
+
+        // Set back to blocking mode for data transfer but with short timeouts
+        ::fcntl(sock, F_SETFL, flags);
 
         ESP_LOGVV(TAG, "Connected to %s:%d", host_.c_str(), port_);
         return sock;
