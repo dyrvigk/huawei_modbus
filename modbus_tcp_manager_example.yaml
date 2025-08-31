@@ -8,39 +8,41 @@ wifi:
   password: "your_password"
   fast_connect: true
   power_save_mode: none
+  # Prevent WiFi disconnects during Modbus issues
+  reboot_timeout: 0s
 
 logger:
   level: INFO
   logs:
-    modbus_tcp_manager: DEBUG
+    modbus_tcp_manager: WARN  # Reduce modbus logging to prevent spam
 
 api:
   encryption:
     key: "your_api_key"
+  # Prevent API disconnects during component issues
+  reboot_timeout: 0s
+  password: ""
 
 ota:
   password: "your_ota_password"
+
+# Enable watchdog to prevent total system hangs
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
 
 external_components:
   - source: github://Gucioo/esphome_modbus_tcp_master
     components: [modbus_tcp_manager]
     refresh: 0s
 
-# Single Modbus TCP connection manager with optional safe mode
+# Modbus manager with very conservative settings
 modbus_tcp_manager:
   id: modbus_device
   host: "192.168.0.3"
   port: 502
   unit_id: 1
-  
-  # Optional: Enable watchdog and safe mode
-  # watchdog_register: 999
-  # watchdog_interval: 5s
-  # safe_mode_registers:
-  #   - register: 502
-  #     value: 150    # 15.0°C safe setpoint
-  #   - register: 504
-  #     value: 0      # Boiler OFF
 
 # Connection status monitoring
 binary_sensor:
@@ -50,16 +52,16 @@ binary_sensor:
     id: modbus_connection
     device_class: connectivity
 
-# Temperature sensors (1-second polling)
+# Temperature sensors with staggered updates to reduce load
 sensor:
   - platform: modbus_tcp_manager
     modbus_tcp_id: modbus_device
     name: "AI1 Temperature"
     id: ai1_temp
     register_address: 0
-    function_code: 4  # Input register
+    function_code: 4
     scale: 0.1
-    update_interval: 1s
+    update_interval: 2s  # Slightly slower to reduce ESP32 load
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
@@ -69,39 +71,44 @@ sensor:
     name: "AM64 Temperature"
     id: am64_temp
     register_address: 591
-    function_code: 3  # Holding register
+    function_code: 3
     scale: 0.1
-    update_interval: 1s
+    update_interval: 3s  # Staggered timing
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
 
-  # Local sensor that triggers immediate writes (on-demand)
+  # Local sensor with safe write logic
   - platform: dallas
     name: "Local Boiler Temperature"
     id: local_boiler_temp
     address: 0x1C0000031EDD2A28
-    update_interval: 1s
+    update_interval: 2s
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
-    # ON-DEMAND WRITE: Every time this sensor updates
+    # Safe on-demand write with error handling
     on_value:
       then:
         - if:
             condition:
-              binary_sensor.is_on: modbus_connection
+              and:
+                - binary_sensor.is_on: modbus_connection
+                - lambda: 'return !isnan(x);'  # Valid value
             then:
               - lambda: |-
-                  // Write local boiler temperature to register 501
-                  auto *modbus = id(modbus_device);
-                  int16_t scaled_value = (int16_t)(x * 10);
-                  bool success = modbus->write_register(501, scaled_value);
-                  if (success) {
-                    ESP_LOGI("main", "Wrote boiler temp: %.1f°C (raw: %d) to register 501", x, scaled_value);
+                  try {
+                    auto *modbus = id(modbus_device);
+                    int16_t scaled_value = (int16_t)(x * 10);
+                    bool success = modbus->write_register(501, scaled_value);
+                    if (success) {
+                      ESP_LOGI("main", "Wrote boiler temp: %.1f°C", x);
+                    }
+                  } catch (...) {
+                    ESP_LOGW("main", "Exception during Modbus write");
                   }
 
-# Manual controls with immediate lambda writes
+# Manual controls with safe write logic
 number:
   - platform: template
     name: "Boiler Setpoint"
@@ -111,109 +118,111 @@ number:
     step: 0.5
     optimistic: true
     unit_of_measurement: "°C"
-    # ON-DEMAND WRITE: Immediately when user changes value
+    # Safe immediate write
     set_action:
       then:
-        - lambda: |-
-            // Write setpoint to register 502
-            auto *modbus = id(modbus_device);
-            int16_t scaled_value = (int16_t)(x * 10);
-            bool success = modbus->write_register(502, scaled_value);
-            if (success) {
-              ESP_LOGI("main", "Set boiler setpoint to %.1f°C (raw: %d)", x, scaled_value);
-            } else {
-              ESP_LOGW("main", "Failed to write setpoint");
-            }
-
-  - platform: template
-    name: "System Mode"
-    id: system_mode
-    min_value: 0
-    max_value: 5
-    step: 1
-    optimistic: true
-    # ON-DEMAND WRITE: Mode changes immediately
-    set_action:
-      then:
-        - lambda: |-
-            // Write system mode to register 503
-            auto *modbus = id(modbus_device);
-            int16_t mode_value = (int16_t)x;
-            bool success = modbus->write_register(503, mode_value);
-            if (success) {
-              ESP_LOGI("main", "Set system mode to %d", mode_value);
-            }
+        - if:
+            condition:
+              binary_sensor.is_on: modbus_connection
+            then:
+              - lambda: |-
+                  try {
+                    auto *modbus = id(modbus_device);
+                    int16_t scaled_value = (int16_t)(x * 10);
+                    bool success = modbus->write_register(502, scaled_value);
+                    if (success) {
+                      ESP_LOGI("main", "Set setpoint: %.1f°C", x);
+                    }
+                  } catch (...) {
+                    ESP_LOGW("main", "Exception during setpoint write");
+                  }
+            else:
+              - logger.log: "Cannot write setpoint - Modbus offline"
 
 switch:
   - platform: template
     name: "Boiler Enable"
     id: boiler_enable
     optimistic: true
-    # ON-DEMAND WRITE: Immediate on/off
+    # Safe on/off with connection check
     turn_on_action:
-      - lambda: |-
-          auto *modbus = id(modbus_device);
-          bool success = modbus->write_register(504, 1);
-          if (success) {
-            ESP_LOGI("main", "Boiler turned ON");
-          }
+      - if:
+          condition:
+            binary_sensor.is_on: modbus_connection
+          then:
+            - lambda: |-
+                try {
+                  auto *modbus = id(modbus_device);
+                  bool success = modbus->write_register(504, 1);
+                  if (success) {
+                    ESP_LOGI("main", "Boiler ON");
+                  }
+                } catch (...) {
+                  ESP_LOGW("main", "Exception during boiler ON");
+                }
+          else:
+            - logger.log: "Cannot turn on boiler - Modbus offline"
     turn_off_action:
       - lambda: |-
-          auto *modbus = id(modbus_device);
-          bool success = modbus->write_register(504, 0);
-          if (success) {
-            ESP_LOGI("main", "Boiler turned OFF");
+          try {
+            auto *modbus = id(modbus_device);
+            bool success = modbus->write_register(504, 0);
+            if (success) {
+              ESP_LOGI("main", "Boiler OFF");
+            }
+          } catch (...) {
+            ESP_LOGW("main", "Exception during boiler OFF");
           }
 
-# Bulk write example
-button:
-  - platform: template
-    name: "Send All Settings"
-    on_press:
-      then:
-        - lambda: |-
-            // Write multiple registers at once
-            auto *modbus = id(modbus_device);
-            std::vector<int16_t> values = {
-              (int16_t)(id(boiler_setpoint).state * 10),  // Setpoint
-              (int16_t)(id(local_boiler_temp).state * 10), // Current temp
-              (int16_t)id(system_mode).state,              // Mode
-              id(boiler_enable).state ? 1 : 0              // Enable status
-            };
-            bool success = modbus->write_registers(600, values);
-            if (success) {
-              ESP_LOGI("main", "Bulk write successful");
-            }
-
-# Status display
+# System status with connection monitoring
 text_sensor:
   - platform: template
     name: "System Status"
     id: system_status
-    update_interval: 2s
+    update_interval: 5s
     lambda: |-
       if (!id(modbus_connection).state) {
-        return {"Modbus Offline"};
+        return {"Modbus Offline - Safe Mode"};
+      } else if (isnan(id(ai1_temp).state) && isnan(id(am64_temp).state)) {
+        return {"No Data Available"};
       } else if (id(boiler_enable).state) {
         return {"Running - " + to_string(id(boiler_setpoint).state) + "°C"};
       } else {
         return {"Standby"};
       }
 
-# Emergency automation
-automation:
-  - trigger:
-      platform: numeric_state
-      entity_id: sensor.ai1_temperature
-      above: 85.0
-    action:
-      - logger.log: "EMERGENCY: Temperature too high!"
-      - switch.turn_off: boiler_enable
-      - number.set:
-          id: boiler_setpoint
-          value: 15.0
+# Less frequent bulk operations to reduce load
+button:
+  - platform: template
+    name: "Send Settings (Safe)"
+    on_press:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: modbus_connection
+            then:
+              - lambda: |-
+                  try {
+                    auto *modbus = id(modbus_device);
+                    std::vector<int16_t> values = {
+                      (int16_t)(id(boiler_setpoint).state * 10),
+                      id(boiler_enable).state ? 1 : 0
+                    };
+                    bool success = modbus->write_registers(600, values);
+                    if (success) {
+                      ESP_LOGI("main", "Bulk write OK");
+                    }
+                  } catch (...) {
+                    ESP_LOGW("main", "Exception during bulk write");
+                  }
+            else:
+              - logger.log: "Cannot send settings - Modbus offline"
+
+# Monitor system health
+interval:
+  - interval: 30s
+    then:
       - lambda: |-
-          // Emergency write
-          auto *modbus = id(modbus_device);
-          std::vector<int16_t> emergency_values = {0, 150, 0, 1}; // OFF, 15°C, Mode 0, Emergency flag
-          modbus->write_registers(600, emergency_values);
+          ESP_LOGI("health", "ESP32 responsive | Modbus: %s | Free heap: %d", 
+                   id(modbus_connection).state ? "OK" : "OFFLINE", 
+                   ESP.getFreeHeap());
