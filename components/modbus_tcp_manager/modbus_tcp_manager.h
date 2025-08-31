@@ -14,6 +14,8 @@
 #include "lwip/netdb.h"
 #include "lwip/inet.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #endif
 
 namespace esphome {
@@ -293,10 +295,14 @@ private:
             return -1;
         }
 
-        // Very short timeouts for 1-second polling
+        // Set socket to non-blocking mode first
+        int flags = ::fcntl(sock, F_GETFL, 0);
+        ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+        // Extremely short timeouts for high-frequency polling
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 500000;  // 500ms timeout
+        timeout.tv_usec = 200000;  // 200ms timeout (very short)
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -304,6 +310,7 @@ private:
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(port_);
         
+        // Use cached IP if possible to avoid DNS delays
         if (::inet_aton(host_.c_str(), &server_addr.sin_addr) == 0) {
             struct hostent *he = ::gethostbyname(host_.c_str());
             if (he == nullptr) {
@@ -314,11 +321,44 @@ private:
             memcpy(&server_addr.sin_addr, he->h_addr, sizeof(server_addr.sin_addr));
         }
 
-        if (::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-            ESP_LOGV(TAG, "Connection failed to %s:%d", host_.c_str(), port_);
-            ::close(sock);
-            return -1;
+        // Non-blocking connect with immediate timeout check
+        int connect_result = ::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
+        if (connect_result < 0) {
+            if (errno == EINPROGRESS) {
+                // Connection in progress, use select with short timeout
+                fd_set write_fds;
+                FD_ZERO(&write_fds);
+                FD_SET(sock, &write_fds);
+                
+                struct timeval connect_timeout;
+                connect_timeout.tv_sec = 0;
+                connect_timeout.tv_usec = 200000;  // 200ms max wait
+                
+                int select_result = ::select(sock + 1, nullptr, &write_fds, nullptr, &connect_timeout);
+                if (select_result <= 0) {
+                    ESP_LOGV(TAG, "Connection timeout to %s:%d", host_.c_str(), port_);
+                    ::close(sock);
+                    return -1;
+                }
+                
+                // Check if connection actually succeeded
+                int error = 0;
+                socklen_t len = sizeof(error);
+                ::getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
+                if (error != 0) {
+                    ESP_LOGV(TAG, "Connection failed to %s:%d (error: %d)", host_.c_str(), port_, error);
+                    ::close(sock);
+                    return -1;
+                }
+            } else {
+                ESP_LOGV(TAG, "Immediate connection failure to %s:%d", host_.c_str(), port_);
+                ::close(sock);
+                return -1;
+            }
         }
+
+        // Set back to blocking mode for data transfer
+        ::fcntl(sock, F_SETFL, flags);
 
         ESP_LOGVV(TAG, "Connected to %s:%d", host_.c_str(), port_);
         return sock;
@@ -467,6 +507,14 @@ public:
             return;
         }
 
+        // Add small delay between sensor updates to reduce load
+        static uint32_t last_update = 0;
+        uint32_t now = millis();
+        if (now - last_update < 50) {  // Minimum 50ms between any sensor updates
+            delay(50 - (now - last_update));
+        }
+        last_update = millis();
+
         ModbusFunction func = (function_code_ == 4) ? 
             ModbusFunction::READ_INPUT_REGISTERS : 
             ModbusFunction::READ_HOLDING_REGISTERS;
@@ -482,7 +530,11 @@ public:
             this->publish_state(scaled_value);
         } else {
             ESP_LOGV(TAG, "Failed to read register %d: %s", register_address_, response.error_message.c_str());
+            // Don't spam logs on connection failures
         }
+        
+        // Yield after each sensor update
+        yield();
     }
 
 private:
