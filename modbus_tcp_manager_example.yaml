@@ -11,9 +11,9 @@ wifi:
   reboot_timeout: 0s
 
 logger:
-  level: INFO
+  level: DEBUG
   logs:
-    modbus_tcp_manager: WARN
+    modbus_tcp_manager: DEBUG
 
 api:
   encryption:
