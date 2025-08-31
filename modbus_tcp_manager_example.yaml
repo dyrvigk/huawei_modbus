@@ -26,27 +26,23 @@ external_components:
     components: [modbus_tcp_manager]
     refresh: 0s
 
-# Modbus manager with optional watchdog and safe mode
+# Single Modbus TCP connection manager with optional safe mode
 modbus_tcp_manager:
   id: modbus_device
   host: "192.168.0.3"
   port: 502
   unit_id: 1
   
-  # Optional watchdog (comment out if not needed)
-  watchdog_register: 999         # Register for watchdog counter
-  watchdog_interval: 5s          # Check every 5 seconds
-  
-  # Optional safe mode values (written when connection fails)
-  safe_mode_registers:
-    - register: 502              # Boiler setpoint register
-      value: 150                 # Safe setpoint: 15.0°C
-    - register: 504              # Boiler enable register  
-      value: 0                   # Safe state: OFF
-    - register: 503              # System mode register
-      value: 0                   # Safe mode: Manual
+  # Optional: Enable watchdog and safe mode
+  # watchdog_register: 999
+  # watchdog_interval: 5s
+  # safe_mode_registers:
+  #   - register: 502
+  #     value: 150    # 15.0°C safe setpoint
+  #   - register: 504
+  #     value: 0      # Boiler OFF
 
-# Connection status
+# Connection status monitoring
 binary_sensor:
   - platform: modbus_tcp_manager
     modbus_tcp_id: modbus_device
@@ -61,7 +57,7 @@ sensor:
     name: "AI1 Temperature"
     id: ai1_temp
     register_address: 0
-    function_code: 4
+    function_code: 4  # Input register
     scale: 0.1
     update_interval: 1s
     unit_of_measurement: "°C"
@@ -73,14 +69,14 @@ sensor:
     name: "AM64 Temperature"
     id: am64_temp
     register_address: 591
-    function_code: 3
+    function_code: 3  # Holding register
     scale: 0.1
     update_interval: 1s
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
 
-  # Local sensor that triggers immediate writes
+  # Local sensor that triggers immediate writes (on-demand)
   - platform: dallas
     name: "Local Boiler Temperature"
     id: local_boiler_temp
@@ -89,39 +85,23 @@ sensor:
     unit_of_measurement: "°C"
     device_class: "temperature"
     accuracy_decimals: 1
-    # ON-DEMAND WRITE: Every time this sensor updates (every 1s)
+    # ON-DEMAND WRITE: Every time this sensor updates
     on_value:
       then:
         - if:
             condition:
               binary_sensor.is_on: modbus_connection
             then:
-              - modbus_tcp.write_register:
-                  id: modbus_device
-                  register: 501
-                  value: !lambda "return (int16_t)(x * 10);"
-              - logger.log: 
-                  format: "Wrote boiler temp: %.1f°C to register 501"
-                  args: ['x']
+              - lambda: |-
+                  // Write local boiler temperature to register 501
+                  auto *modbus = id(modbus_device);
+                  int16_t scaled_value = (int16_t)(x * 10);
+                  bool success = modbus->write_register(501, scaled_value);
+                  if (success) {
+                    ESP_LOGI("main", "Wrote boiler temp: %.1f°C (raw: %d) to register 501", x, scaled_value);
+                  }
 
-  # Another local sensor for system monitoring
-  - platform: wifi_signal
-    name: "WiFi Signal"
-    id: wifi_signal
-    update_interval: 5s
-    # Write WiFi signal strength for remote monitoring
-    on_value:
-      then:
-        - if:
-            condition:
-              binary_sensor.is_on: modbus_connection
-            then:
-              - modbus_tcp.write_register:
-                  id: modbus_device
-                  register: 510
-                  value: !lambda "return (int16_t)(x + 100);"  # Convert -70dBm to 30
-
-# Manual controls with immediate writes
+# Manual controls with immediate lambda writes
 number:
   - platform: template
     name: "Boiler Setpoint"
@@ -134,13 +114,16 @@ number:
     # ON-DEMAND WRITE: Immediately when user changes value
     set_action:
       then:
-        - modbus_tcp.write_register:
-            id: modbus_device
-            register: 502
-            value: !lambda "return (int16_t)(x * 10);"
-        - logger.log:
-            format: "Set boiler setpoint to %.1f°C"
-            args: ['x']
+        - lambda: |-
+            // Write setpoint to register 502
+            auto *modbus = id(modbus_device);
+            int16_t scaled_value = (int16_t)(x * 10);
+            bool success = modbus->write_register(502, scaled_value);
+            if (success) {
+              ESP_LOGI("main", "Set boiler setpoint to %.1f°C (raw: %d)", x, scaled_value);
+            } else {
+              ESP_LOGW("main", "Failed to write setpoint");
+            }
 
   - platform: template
     name: "System Mode"
@@ -152,10 +135,14 @@ number:
     # ON-DEMAND WRITE: Mode changes immediately
     set_action:
       then:
-        - modbus_tcp.write_register:
-            id: modbus_device
-            register: 503
-            value: !lambda "return (int16_t)x;"
+        - lambda: |-
+            // Write system mode to register 503
+            auto *modbus = id(modbus_device);
+            int16_t mode_value = (int16_t)x;
+            bool success = modbus->write_register(503, mode_value);
+            if (success) {
+              ESP_LOGI("main", "Set system mode to %d", mode_value);
+            }
 
 switch:
   - platform: template
@@ -164,19 +151,41 @@ switch:
     optimistic: true
     # ON-DEMAND WRITE: Immediate on/off
     turn_on_action:
-      - modbus_tcp.write_register:
-          id: modbus_device
-          register: 504
-          value: 1
-      - logger.log: "Boiler turned ON"
+      - lambda: |-
+          auto *modbus = id(modbus_device);
+          bool success = modbus->write_register(504, 1);
+          if (success) {
+            ESP_LOGI("main", "Boiler turned ON");
+          }
     turn_off_action:
-      - modbus_tcp.write_register:
-          id: modbus_device
-          register: 504
-          value: 0
-      - logger.log: "Boiler turned OFF"
+      - lambda: |-
+          auto *modbus = id(modbus_device);
+          bool success = modbus->write_register(504, 0);
+          if (success) {
+            ESP_LOGI("main", "Boiler turned OFF");
+          }
 
-# Status indicators
+# Bulk write example
+button:
+  - platform: template
+    name: "Send All Settings"
+    on_press:
+      then:
+        - lambda: |-
+            // Write multiple registers at once
+            auto *modbus = id(modbus_device);
+            std::vector<int16_t> values = {
+              (int16_t)(id(boiler_setpoint).state * 10),  // Setpoint
+              (int16_t)(id(local_boiler_temp).state * 10), // Current temp
+              (int16_t)id(system_mode).state,              // Mode
+              id(boiler_enable).state ? 1 : 0              // Enable status
+            };
+            bool success = modbus->write_registers(600, values);
+            if (success) {
+              ESP_LOGI("main", "Bulk write successful");
+            }
+
+# Status display
 text_sensor:
   - platform: template
     name: "System Status"
@@ -184,14 +193,14 @@ text_sensor:
     update_interval: 2s
     lambda: |-
       if (!id(modbus_connection).state) {
-        return {"Modbus Offline - SAFE MODE"};
+        return {"Modbus Offline"};
       } else if (id(boiler_enable).state) {
-        return {"Running - Setpoint: " + to_string(id(boiler_setpoint).state) + "°C"};
+        return {"Running - " + to_string(id(boiler_setpoint).state) + "°C"};
       } else {
         return {"Standby"};
       }
 
-# Example automation: Emergency shutdown
+# Emergency automation
 automation:
   - trigger:
       platform: numeric_state
@@ -203,8 +212,8 @@ automation:
       - number.set:
           id: boiler_setpoint
           value: 15.0
-      # Multiple emergency writes
-      - modbus_tcp.write_multiple_registers:
-          id: modbus_device
-          register: 600
-          values: [0, 150, 0, 1]  # Enable=OFF, Setpoint=15°C, Mode=0, Emergency=1
+      - lambda: |-
+          // Emergency write
+          auto *modbus = id(modbus_device);
+          std::vector<int16_t> emergency_values = {0, 150, 0, 1}; // OFF, 15°C, Mode 0, Emergency flag
+          modbus->write_registers(600, emergency_values);
