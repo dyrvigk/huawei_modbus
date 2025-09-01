@@ -22,6 +22,17 @@ A robust external component for ESPHome that provides Modbus TCP client function
 | 6 | Write Single Register | Write individual values |
 | 16 | Write Multiple Registers | Bulk write operations |
 
+## Works with ESP32
+
+Tested on ESP32-S2-mini, esp-idf framework:
+
+```yaml
+esp32:
+  board: lolin_s2_mini
+  framework:
+    type: esp-idf
+```
+
 ## Installation
 
 Add this to your ESPHome configuration:
