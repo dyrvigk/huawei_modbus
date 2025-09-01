@@ -1,4 +1,4 @@
-# ESPHome Modbus TCP Manager
+# ESPHome Modbus TCP Manager <a href="https://buymeacoffee.com/gucioo" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
 A robust external component for ESPHome that provides Modbus TCP client functionality with advanced connection management, multiple register support, and optional safety features.
 
