@@ -318,7 +318,7 @@ private:
                 
                 struct timeval timeout;
                 timeout.tv_sec = 0;
-                timeout.tv_usec = 30000;  // 1ms timeout - very fast check
+                timeout.tv_usec = 10000;  // 1ms timeout - very fast check
                 
                 int select_result = ::select(connection_check_sock_ + 1, nullptr, &write_fds, &error_fds, &timeout);
                 
@@ -446,7 +446,7 @@ private:
         // Very short timeouts for data operations
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 30000;  // 100ms timeout - even shorter
+        timeout.tv_usec = 10000;  // 100ms timeout - even shorter
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -474,8 +474,8 @@ private:
                 FD_SET(sock, &write_fds);
                 
                 struct timeval connect_timeout;
-                connect_timeout.tv_sec = 1;
-                connect_timeout.tv_usec = 0;  // 100ms max wait - very short
+                connect_timeout.tv_sec = 0;
+                connect_timeout.tv_usec = 10000;  // 100ms max wait - very short
                 
                 int select_result = ::select(sock + 1, nullptr, &write_fds, nullptr, &connect_timeout);
                 if (select_result <= 0) {
