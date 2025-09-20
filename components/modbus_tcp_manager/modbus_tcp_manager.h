@@ -343,7 +343,7 @@ private:
                         }
                         connection_check_state_ = ConnectionCheckState::CLEANUP;
                     }
-                } else if (now - connection_check_start_time_ > 1500) {
+                } else if (now - connection_check_start_time_ > 500) {
                     // Timeout after 500ms
                     ESP_LOGV(TAG, "Connection check timeout");
                     connection_check_success_ = false;
@@ -445,8 +445,8 @@ private:
 
         // Very short timeouts for data operations
         struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 20000;  // 100ms timeout - even shorter
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;  // 100ms timeout - even shorter
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -474,8 +474,8 @@ private:
                 FD_SET(sock, &write_fds);
                 
                 struct timeval connect_timeout;
-                connect_timeout.tv_sec = 2;
-                connect_timeout.tv_usec = 0;  // 100ms max wait - very short
+                connect_timeout.tv_sec = 0;
+                connect_timeout.tv_usec = 1000;  // 100ms max wait - very short
                 
                 int select_result = ::select(sock + 1, nullptr, &write_fds, nullptr, &connect_timeout);
                 if (select_result <= 0) {
@@ -680,7 +680,7 @@ private:
 class ModbusTCPConnectionSensor : public PollingComponent, public binary_sensor::BinarySensor {
 public:
     ModbusTCPConnectionSensor(ModbusTCPManager *parent) : parent_(parent) {
-        this->set_update_interval(1000);  // Check every 1 second for faster response
+        this->set_update_interval(5000);  // Check every 1 second for faster response
     }
 
     void setup() override {
