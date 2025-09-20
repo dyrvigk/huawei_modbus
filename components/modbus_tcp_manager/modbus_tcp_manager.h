@@ -445,8 +445,8 @@ private:
 
         // Very short timeouts for data operations
         struct timeval timeout;
-        timeout.tv_sec = 2;
-        timeout.tv_usec = 0;  // 100ms timeout - even shorter
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 30000;  // 100ms timeout - even shorter
         ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
